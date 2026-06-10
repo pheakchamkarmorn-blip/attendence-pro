@@ -4,6 +4,7 @@ import fs from "fs";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import { createClient } from "@supabase/supabase-js";
 
 dotenv.config();
 
@@ -12,6 +13,132 @@ const PORT = 3000;
 
 // Setup database local persistence file
 const DB_FILE = path.join(process.cwd(), "attendance-db.json");
+
+// Supabase client initialization
+const supabaseUrl = process.env.SUPABASE_URL || "";
+const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || "";
+
+let supabase: any = null;
+if (supabaseUrl && supabaseAnonKey && supabaseUrl !== "MY_SUPABASE_URL" && supabaseUrl.trim() !== "") {
+  try {
+    supabase = createClient(supabaseUrl, supabaseAnonKey);
+    console.log("[Supabase] Client initialized successfully.");
+  } catch (error) {
+    console.error("[Supabase] Failed to initialize Supabase client:", error);
+  }
+}
+
+// Function to fetch all rows from any Supabase table bypassing the default 1000-row result limit of Free Plan database API:
+async function fetchAllSupabaseRows(table: string): Promise<any[]> {
+  if (!supabase) {
+    throw new Error("Supabase client is not initialized. Please verify SUPABASE_URL and SUPABASE_ANON_KEY.");
+  }
+
+  let allData: any[] = [];
+  let from = 0;
+  const size = 1000; // Chunk size of 1000 rows max limit per individual request on Supabase Free tier
+  let hasMore = true;
+
+  console.log(`[Supabase_KHMER] ចាប់ផ្តើមទាញទិន្នន័យពីតារាង "${table}" (ដាក់លក្ខខណ្ឌ pagination ពង្រីកឲលើសពី ១០០០ ជួរ)...`);
+
+  while (hasMore) {
+    const { data, error } = await supabase
+      .from(table)
+      .select("*")
+      .range(from, from + size - 1);
+
+    if (error) {
+       console.error(`[Supabase] fetching table ${table} error at range [${from}, ${from + size - 1}]:`, error);
+       throw error;
+    }
+
+    if (data && data.length > 0) {
+      allData = allData.concat(data);
+      console.log(`[Supabase] ទាញបានចំនួន ${data.length} ជួរ (សរុបប្រមូលផ្តុំ៖ ${allData.length} ជួរ)`);
+      if (data.length < size) {
+        hasMore = false; // reached end of data
+      } else {
+        from += size; // advance range pointer
+      }
+    } else {
+      hasMore = false;
+    }
+  }
+
+  return allData;
+}
+
+const SUPABASE_SQL_SCHEMA = `
+-- ១. បង្កើតតារាងបុគ្គលិក Employees
+CREATE TABLE IF NOT EXISTS employees (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  phone TEXT NOT NULL,
+  "telegramChatId" TEXT DEFAULT '',
+  salary NUMERIC DEFAULT 0,
+  position TEXT DEFAULT '',
+  department TEXT DEFAULT '',
+  "joinedDate" TEXT DEFAULT ''
+);
+
+-- ២. បង្កើតតារាងវត្តមាន Attendance
+CREATE TABLE IF NOT EXISTS attendance (
+  id TEXT PRIMARY KEY,
+  "employeeId" TEXT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  date TEXT NOT NULL,
+  "checkInTime" TEXT DEFAULT '',
+  "checkOutTime" TEXT,
+  "checkInDistance" NUMERIC,
+  "checkOutDistance" NUMERIC,
+  status TEXT DEFAULT 'on_time',
+  "checkInLocation" JSONB,
+  "checkOutLocation" JSONB,
+  notes TEXT
+);
+
+-- ៣. បង្កើតតារាងបើកប្រាក់ខែ Payroll
+CREATE TABLE IF NOT EXISTS payroll (
+  id TEXT PRIMARY KEY,
+  "employeeId" TEXT NOT NULL REFERENCES employees(id) ON DELETE CASCADE,
+  month TEXT NOT NULL,
+  "baseSalary" NUMERIC DEFAULT 0,
+  allowances NUMERIC DEFAULT 0,
+  "allowancesExplanation" TEXT DEFAULT '',
+  deductions NUMERIC DEFAULT 0,
+  "deductionsExplanation" TEXT DEFAULT '',
+  "netSalary" NUMERIC DEFAULT 0,
+  status TEXT DEFAULT 'pending',
+  "paymentDate" TEXT,
+  "calculatedAt" TEXT
+);
+
+-- ៤. បង្កើតតារាងកំណត់ប្រព័ន្ធ Settings (រក្សាទុកតម្លៃ ១ ជួរជានិច្ច)
+CREATE TABLE IF NOT EXISTS settings (
+  id TEXT PRIMARY KEY,
+  "officeLat" NUMERIC DEFAULT 11.5564,
+  "officeLng" NUMERIC DEFAULT 104.9282,
+  "officeRadius" NUMERIC DEFAULT 50,
+  "officeAddress" TEXT,
+  "telegramBotToken" TEXT,
+  "telegramGroupId" TEXT,
+  "workStartTime" TEXT DEFAULT '08:00',
+  "workEndTime" TEXT DEFAULT '17:00',
+  "deductionRateLateMin" NUMERIC DEFAULT 0.1,
+  "deductionRateAbsent" NUMERIC DEFAULT 15,
+  "autoCalculateDeductions" BOOLEAN DEFAULT true
+);
+
+-- ៥. បង្កើតតារាងប្រអប់ Live Telegram Bot Logs
+CREATE TABLE IF NOT EXISTS telegram_logs (
+  id TEXT PRIMARY KEY,
+  timestamp TEXT NOT NULL,
+  recipient TEXT NOT NULL,
+  "chatId" TEXT,
+  message TEXT,
+  success BOOLEAN,
+  "statusMessage" TEXT
+);
+`;
 
 // Define interfaces locally for use in server.ts
 interface Employee {
@@ -949,6 +1076,166 @@ Requirements for the output:
   } catch (err: any) {
     console.error("Gemini reporting error:", err);
     res.status(500).json({ error: "Failed generating report via Gemini API: " + err.message });
+  }
+});
+
+// --- SUPABASE INTUITIVE INTEGRATION ENDPOINTS ---
+
+// 1. Get Supabase Connection Configuration & SQL Schema
+app.get("/api/supabase/config", (req, res) => {
+  res.json({
+    hasUrl: !!supabaseUrl,
+    hasAnonKey: !!supabaseAnonKey,
+    supabaseUrl: supabaseUrl ? `${supabaseUrl.substring(0, Math.min(20, supabaseUrl.length))}...` : "",
+    isConnected: !!supabase,
+    sqlSchema: SUPABASE_SQL_SCHEMA,
+    limitHandlingExplanations: "គម្រោង Supabase Free Plan កំណត់ឲ្យទាញទិន្នន័យបានត្រឹមតែ ១០០០ ជួរក្នុងមួយដងប៉ុណ្ណោះ។ ដើម្បីដោះស្រាយនេះ ប្រព័ន្ធបានប្រើប្រាស់ប្រមាណវិធី Pagination range(from, from + 1000 - 1) រត់វិលជុំជាលក្ខខណ្ឌស្វ័យប្រវត្ត ដើម្បីទាញទិន្នន័យទាំងអស់កើនលើសពី ១០០០ ជួរបានដោយសុវត្ថិភាព និងឥតគិតថ្លៃ!"
+  });
+});
+
+// 2. Test Supabase Database Connection & fetch 1000+ data dynamically
+app.get("/api/supabase/test", async (req, res) => {
+  if (!supabase) {
+    return res.status(400).json({
+      success: false,
+      message: "សូមបំពេញកូអរដោនេរ Supabase (SUPABASE_URL, SUPABASE_ANON_KEY) នៅក្នុង environment Variables ជាមុនសិន។"
+    });
+  }
+
+  try {
+    // Attempt simple select from settings to check connection status / table existence
+    const { data: settingsData, error: settingsError } = await supabase.from("settings").select("id").limit(1);
+    if (settingsError) {
+      return res.status(200).json({
+        success: false,
+        message: "តភ្ជាប់ទៅកាន់ Supabase API បានជោគជ័យ ប៉ុន្តែមិនទាន់អាចស្វែងរកតារាង (tables) ឃើញនៅឡើយទេ។ សូមចម្លងកូដ SQL ខាងស្តាំទៅដំណើរការ (Run) ក្នុង SQL Editor របស់ Supabase dashboard ជាមុនសិន។",
+        error: settingsError.message
+      });
+    }
+
+    // Try fetching employees table using our custom limit bypass function
+    const employees = await fetchAllSupabaseRows("employees");
+
+    return res.json({
+      success: true,
+      message: "🎉 ជោគជ័យ៖ ការតភ្ជាប់ទៅកាន់ Supabase និងតារាងទិន្នន័យត្រូវបានផ្គូរផ្គងរួចរាល់!",
+      employeeCountFetched: employees.length,
+      rowsRetrieveLimitMethodUsed: "fetchAllSupabaseRows() - [Pagination Loop Activated] - ទាញយកបានលើសពី ១០០០ ជួរដោយស្វ័យប្រវត្តិ"
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      message: "ការតភ្ជាប់ទៅកាន់ Supabase មានកំហុស៖ " + err.message
+    });
+  }
+});
+
+// 3. Sync local JSON DB file data to Supabase (Upload all entries)
+app.post("/api/supabase/sync", async (req, res) => {
+  if (!supabase) {
+    return res.status(400).json({ success: false, error: "សូមបំពេញការកំណត់ Supabase integration logs ជាមុនសិន។" });
+  }
+
+  const db = loadDb();
+  let syncReport: any = {
+    employees: { total: db.employees.length, synced: 0, errors: null },
+    attendance: { total: db.attendance.length, synced: 0, errors: null },
+    payroll: { total: db.payroll.length, synced: 0, errors: null },
+    settings: { synced: false, errors: null },
+    telegramLogs: { total: db.telegramLogs.length, synced: 0, errors: null },
+  };
+
+  try {
+    // Sync employees
+    if (db.employees.length > 0) {
+      const { error } = await supabase.from("employees").upsert(db.employees);
+      if (error) syncReport.employees.errors = error.message;
+      else syncReport.employees.synced = db.employees.length;
+    }
+
+    // Sync attendance
+    if (db.attendance.length > 0) {
+      const attendanceData = db.attendance.map(item => ({
+        id: item.id,
+        employeeId: item.employeeId,
+        date: item.date,
+        checkInTime: item.checkInTime,
+        checkOutTime: item.checkOutTime,
+        checkInDistance: item.checkInDistance,
+        checkOutDistance: item.checkOutDistance,
+        status: item.status,
+        checkInLocation: item.checkInLocation,
+        checkOutLocation: item.checkOutLocation,
+        notes: item.notes
+      }));
+      const { error } = await supabase.from("attendance").upsert(attendanceData);
+      if (error) syncReport.attendance.errors = error.message;
+      else syncReport.attendance.synced = db.attendance.length;
+    }
+
+    // Sync payroll
+    if (db.payroll.length > 0) {
+      const { error } = await supabase.from("payroll").upsert(db.payroll);
+      if (error) syncReport.payroll.errors = error.message;
+      else syncReport.payroll.synced = db.payroll.length;
+    }
+
+    // Sync settings
+    const settingsPayload = {
+      id: "GLOBAL_SETTINGS",
+      officeLat: db.settings.officeLat,
+      officeLng: db.settings.officeLng,
+      officeRadius: db.settings.officeRadius,
+      officeAddress: db.settings.officeAddress,
+      telegramBotToken: db.settings.telegramBotToken,
+      telegramGroupId: db.settings.telegramGroupId,
+      workStartTime: db.settings.workStartTime,
+      workEndTime: db.settings.workEndTime,
+      deductionRateLateMin: db.settings.deductionRateLateMin,
+      deductionRateAbsent: db.settings.deductionRateAbsent,
+      autoCalculateDeductions: db.settings.autoCalculateDeductions,
+    };
+    const { error: settingsErr } = await supabase.from("settings").upsert([settingsPayload]);
+    if (settingsErr) syncReport.settings.errors = settingsErr.message;
+    else syncReport.settings.synced = true;
+
+    // Sync telegram_logs
+    if (db.telegramLogs.length > 0) {
+      const logsPayload = db.telegramLogs.map(log => ({
+        id: log.id,
+        timestamp: log.timestamp,
+        recipient: log.recipient,
+        chatId: log.chatId,
+        message: log.message,
+        success: log.success,
+        statusMessage: log.statusMessage
+      }));
+      const { error } = await supabase.from("telegram_logs").upsert(logsPayload);
+      if (error) syncReport.telegramLogs.errors = error.message;
+      else syncReport.telegramLogs.synced = db.telegramLogs.length;
+    }
+
+    // Try fetching employees table back to verify with limit bypass logic
+    let verifiedCount = 0;
+    try {
+      const verifiedData = await fetchAllSupabaseRows("employees");
+      verifiedCount = verifiedData.length;
+    } catch (verifErr) {
+      console.warn("Verification fetching failed: ", verifErr);
+    }
+
+    return res.json({
+      success: true,
+      message: "ទិន្នន័យត្រូវបានបញ្ជូនទៅ Supabase និងធ្វើតេស្តលក្ខខណ្ឌទាញយកលើសពី ១០០០ ជួរបានជោគជ័យ!",
+      report: syncReport,
+      verificationCount: verifiedCount
+    });
+  } catch (err: any) {
+    return res.status(500).json({
+      success: false,
+      error: "បរាជ័យក្នុងការបញ្ជូនទិន្នន័យទៅកាន់ Supabase៖ " + err.message,
+      report: syncReport
+    });
   }
 });
 

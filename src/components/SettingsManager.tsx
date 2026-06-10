@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from "react";
-import { Sliders, MapPin, MessageSquare, ShieldAlert, Send, Save, BookOpen, Clock, HelpCircle, HardDrive } from "lucide-react";
+import { Sliders, MapPin, MessageSquare, ShieldAlert, Send, Save, BookOpen, Clock, HelpCircle, HardDrive, Database, Link, Copy, Check, Terminal, ExternalLink, ShieldCheck } from "lucide-react";
 import { SystemSettings } from "../types";
 
 interface SettingsManagerProps {
@@ -31,6 +31,21 @@ export default function SettingsManager({ settings, onUpdateSettings, onClearAtt
   const [testingConnection, setTestingConnection] = useState<boolean>(false);
   const [testResult, setTestResult] = useState<{ success: boolean; message: string } | null>(null);
   const [telegramLogs, setTelegramLogs] = useState<any[]>([]);
+
+  // Supabase Integration States
+  const [supabaseConfig, setSupabaseConfig] = useState<{
+    hasUrl: boolean;
+    hasAnonKey: boolean;
+    supabaseUrl: string;
+    isConnected: boolean;
+    sqlSchema: string;
+    limitHandlingExplanations: string;
+  } | null>(null);
+  const [isTestingSupabase, setIsTestingSupabase] = useState<boolean>(false);
+  const [isSyncingSupabase, setIsSyncingSupabase] = useState<boolean>(false);
+  const [supabaseTestMsg, setSupabaseTestMsg] = useState<{ success: boolean; message: string; subText?: string } | null>(null);
+  const [showSchema, setShowSchema] = useState<boolean>(false);
+  const [copied, setCopied] = useState<boolean>(false);
 
   const settingsMapRef = useRef<any>(null);
   const mapContainerRef = useRef<HTMLDivElement>(null);
@@ -72,6 +87,77 @@ export default function SettingsManager({ settings, onUpdateSettings, onClearAtt
     const timer = setInterval(fetchTelegramLogs, 8000);
     return () => clearInterval(timer);
   }, []);
+
+  // Load Supabase Configurations from Server status API
+  const fetchSupabaseConfig = async () => {
+    try {
+      const response = await fetch("/api/supabase/config");
+      if (response.ok) {
+        const data = await response.json();
+        setSupabaseConfig(data);
+      }
+    } catch (err) {
+      console.error("Failed loading Supabase configuration:", err);
+    }
+  };
+
+  useEffect(() => {
+    fetchSupabaseConfig();
+  }, []);
+
+  const handleTestSupabase = async () => {
+    setIsTestingSupabase(true);
+    setSupabaseTestMsg(null);
+    try {
+      const response = await fetch("/api/supabase/test");
+      const data = await response.json();
+      setSupabaseTestMsg({
+        success: data.success,
+        message: data.message,
+        subText: data.employeeCountFetched !== undefined 
+          ? `គណនីទាញយក៖ ${data.rowsRetrieveLimitMethodUsed} (ស្កេនទាញបានពី Supabase៖ ${data.employeeCountFetched} ជួរ)`
+          : undefined
+      });
+      fetchSupabaseConfig();
+    } catch (err: any) {
+      setSupabaseTestMsg({ success: false, message: "ការតភ្ជាប់មានកំហុស៖ " + err.message });
+    } finally {
+      setIsTestingSupabase(false);
+    }
+  };
+
+  const handleSyncSupabase = async () => {
+    if (!confirm("⚠️ តើអ្នកចង់បញ្ជូនទិន្នន័យពី local JSON Database ឡើងទៅកាន់ Supabase ដែរឬទេ? ទិន្នន័យចាស់ដែលមាន ID ដូចគ្នានឹងត្រូវធ្វើសមកាលកម្ម Upsert ជាន់គ្នា។")) {
+      return;
+    }
+    setIsSyncingSupabase(true);
+    setSupabaseTestMsg(null);
+    try {
+      const response = await fetch("/api/supabase/sync", { method: "POST" });
+      const data = await response.json();
+      if (data.success) {
+        setSupabaseTestMsg({
+          success: true,
+          message: data.message,
+          subText: `បុគ្គលិកសមកាលជោគជ័យ៖ ${data.report.employees.synced}/${data.report.employees.total} ជួរ | វត្តមាន៖ ${data.report.attendance.synced}/${data.report.attendance.total} ជួរ | ប្រាក់ខែ៖ ${data.report.payroll.synced}/${data.report.payroll.total} ជួរ`
+        });
+      } else {
+        setSupabaseTestMsg({ success: false, message: "កំហុស៖ " + (data.error || "ការសមកាលបរាជ័យ") });
+      }
+      fetchSupabaseConfig();
+    } catch (err: any) {
+      setSupabaseTestMsg({ success: false, message: "ការសមកាលមានកំហុស៖ " + err.message });
+    } finally {
+      setIsSyncingSupabase(false);
+    }
+  };
+
+  const copySqlToClipboard = () => {
+    if (!supabaseConfig?.sqlSchema) return;
+    navigator.clipboard.writeText(supabaseConfig.sqlSchema);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 2000);
+  };
 
   // Map Initialization for settings coordinates picking
   useEffect(() => {
@@ -391,6 +477,142 @@ export default function SettingsManager({ settings, onUpdateSettings, onClearAtt
           </span>
           <div className="relative flex-1 rounded-xl overflow-hidden border border-slate-100 z-10">
             <div ref={mapContainerRef} className="h-full w-full"></div>
+          </div>
+        </div>
+
+        {/* Supabase Connection Setup Panel */}
+        <div className="bg-white p-5 rounded-2xl border border-slate-200 shadow-xs space-y-4" id="supabase_integration_panel">
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <div className="flex items-center gap-2">
+              <div className="p-2 bg-indigo-50 text-indigo-600 rounded-lg">
+                <Database size={16} />
+              </div>
+              <div>
+                <h3 className="text-xs font-extrabold uppercase tracking-wider text-slate-800">សមកាលកម្ម Supabase Database</h3>
+                <p className="text-[10px] text-slate-400 mt-0.5">Connect and sync with Supabase PostgreSQL</p>
+              </div>
+            </div>
+            {supabaseConfig?.isConnected ? (
+              <span className="inline-flex items-center gap-1 py-0.5 px-2 bg-emerald-50 text-emerald-700 border border-emerald-100 rounded-full text-[10px] font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
+                ភ្ជាប់រួចរាល់
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-1 py-0.5 px-2 bg-amber-50 text-amber-700 border border-amber-100 rounded-full text-[10px] font-bold">
+                <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
+                មិនទាន់ភ្ជាប់
+              </span>
+            )}
+          </div>
+
+          {/* Connection Stats / Help */}
+          <div className="space-y-2.5 text-xs">
+            <div className="bg-slate-50 p-3 rounded-xl border border-slate-100 space-y-1.5 text-[11px]">
+              <div className="flex justify-between items-center">
+                <span className="font-bold text-slate-500">ស្ថានភាព API Client៖</span>
+                <span className={`font-bold ${supabaseConfig?.isConnected ? "text-emerald-600" : "text-amber-600"}`}>
+                  {supabaseConfig?.isConnected ? "Active (ដំណើរការ)" : "Unconfigured (មិនទាន់រៀបចំ)"}
+                </span>
+              </div>
+              <div className="flex justify-between items-center text-[10.5px]">
+                <span className="font-bold text-slate-500">កូអរដោនេ URL៖</span>
+                <span className="font-mono text-slate-700 font-bold max-w-44 truncate">
+                  {supabaseConfig?.hasUrl ? supabaseConfig.supabaseUrl : "Unset (.env.example)"}
+                </span>
+              </div>
+            </div>
+
+            {/* Instruction about adding to Vercel and Free plan row bypass conditions */}
+            <div className="bg-indigo-50/50 p-3.5 rounded-xl border border-indigo-100/60 text-[11px] leading-relaxed text-indigo-900 space-y-2">
+              <div className="flex gap-1.5 items-start">
+                <ShieldCheck size={14} className="text-indigo-600 shrink-0 mt-0.5" />
+                <p className="font-medium text-slate-700">
+                  <strong className="text-indigo-950 block mb-0.5">💡 ការណែនាំរៀបចំទៅកាន់ Vercel៖</strong>
+                  ដើម្បីដំណើរការកម្មវិធី និងទិន្នន័យលើ Vercel សូមចម្លងយកតម្លៃ <code className="bg-white px-1 py-0.5 border border-slate-200/60 rounded text-[10px] font-mono text-rose-600">SUPABASE_URL</code> និង <code className="bg-white px-1 py-0.5 border border-slate-200/60 rounded text-[10px] font-mono text-rose-600">SUPABASE_ANON_KEY</code> ទៅដាក់ក្នុង <strong className="text-indigo-950">Vercel Environment Variables</strong> របស់ Project របស់អ្នក។
+                </p>
+              </div>
+
+              <div className="flex gap-1.5 items-start border-t border-indigo-100/50 pt-2 mt-1">
+                <Sliders size={14} className="text-indigo-600 shrink-0 mt-0.5" />
+                <p className="font-medium text-slate-700 text-[10.5px]">
+                  <strong className="text-indigo-950 block mb-0.5">✨ ដោះស្រាយបញ្ហា Free Plan ទាញទិន្នន័យ &gt; ១០០០ ជួរ៖</strong>
+                  គម្រោង Free standard API របស់ Supabase កំណត់ការទាញយកទិន្នន័យត្រឹម ១០០០ ជួរក្នុងមួយដង។ វិស្វករយើងបានបង្កើកលក្ខខណ្ឌ <strong className="text-indigo-950">Pagination Range Looping API</strong> លើ backend រួចរាល់ ដើម្បីអាចស្កេនទាញទិន្នន័យបានខ្ពស់គ្មានដែនកំណត់ បម្រើដល់ទិន្នន័យបុគ្គលិកដ៏ច្រើន!
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Action buttons */}
+          <div className="grid grid-cols-2 gap-2 pt-1 font-sans">
+            <button
+              onClick={handleTestSupabase}
+              disabled={isTestingSupabase}
+              className="py-2 px-3 border border-slate-200 hover:border-blue-500 bg-white hover:bg-slate-50 text-slate-700 hover:text-blue-600 text-[11px] font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5"
+            >
+              <Terminal size={13} className={isTestingSupabase ? "animate-spin" : ""} />
+              {isTestingSupabase ? "កំពុងតេស្ត..." : "តេស្តការតភ្ជាប់"}
+            </button>
+
+            <button
+              onClick={handleSyncSupabase}
+              disabled={isSyncingSupabase}
+              className="py-2 px-3 bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-bold rounded-xl transition-all cursor-pointer flex items-center justify-center gap-1.5 shadow-xs"
+            >
+              <Database size={13} className={isSyncingSupabase ? "animate-spin" : ""} />
+              {isSyncingSupabase ? "កំពុងបញ្ជូន..." : "បញ្ជូនទិន្នន័យ (Sync)"}
+            </button>
+          </div>
+
+          {supabaseTestMsg && (
+            <div className={`p-3 rounded-xl border text-[11px] font-sans leading-relaxed space-y-1 ${
+              supabaseTestMsg.success 
+                ? "bg-emerald-50 text-emerald-800 border-emerald-100" 
+                : "bg-rose-50 text-rose-800 border-rose-100"
+            }`}>
+              <p className="font-bold flex items-center gap-1">
+                <span>{supabaseTestMsg.success ? "✅ ជោគជ័យ៖" : "❌ បរាជ័យ៖"}</span>
+                <span>{supabaseTestMsg.message}</span>
+              </p>
+              {supabaseTestMsg.subText && (
+                <p className="text-[10px] text-slate-500 font-mono leading-tight bg-slate-100/80 p-2 rounded-lg mt-1 select-all">
+                  {supabaseTestMsg.subText}
+                </p>
+              )}
+            </div>
+          )}
+
+          {/* Schema generator component */}
+          <div className="border-t border-slate-100 pt-3">
+            <button
+              onClick={() => setShowSchema(!showSchema)}
+              className="w-full flex items-center justify-between text-slate-500 hover:text-indigo-600 text-[11px] font-black transition-all cursor-pointer select-none"
+            >
+              <span className="flex items-center gap-1.5">
+                <Terminal size={12} className="text-indigo-600" />
+                កូដ SQL សម្រាប់បង្កើតតារាង Supabase (Copy schema)
+              </span>
+              <span className="text-xs">{showSchema ? "▲ លាក់" : "▼ បង្ហាញ"}</span>
+            </button>
+
+            {showSchema && supabaseConfig?.sqlSchema && (
+              <div className="mt-2.5 space-y-2">
+                <p className="text-[10px] text-slate-400 select-none leading-normal">
+                  សូមចម្លងកូដ SQL ខាងក្រោម ហើយយកទៅដំណើរការជម្រើស SQL editor លើ Supabase Dashboard គណនីរបស់អ្នក ដើម្បីរៀបចំរចនាសម្ព័ន្ធតារាង៖
+                </p>
+                <div className="relative">
+                  <pre className="p-3 bg-slate-900 text-slate-100 rounded-xl overflow-x-auto text-[9.5px] font-mono leading-relaxed h-48 select-all">
+                    {supabaseConfig.sqlSchema}
+                  </pre>
+                  <button
+                    onClick={copySqlToClipboard}
+                    className="absolute top-2.5 right-2.5 p-1.5 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg hover:text-white transition-all cursor-pointer"
+                    title="Copy to clipboard"
+                  >
+                    {copied ? <Check size={13} className="text-emerald-400" /> : <Copy size={13} />}
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
